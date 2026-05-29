@@ -3,43 +3,72 @@ import numpy as np
 import os
 
 def timeBin(d):
-    """
-    Takes a dataframe of participant data and returns the 'delta' (in minutes) used for binning
-    """
+    # Returns the epoch interval in minutes — the gap between the first two rows.
+    # Used to verify the data is at 60-second (or finer) resolution before
+    # aggregating to hourly means.
+    # Equivalent to R: timeBin <- function(d) { as.numeric(d$Time[2] - d$Time[1]) }
     if len(d) > 1:
-        delta = (d['Time'].iloc[1] - d['Time'].iloc[0]).total_seconds() / 60.0
-        return delta
+        return (d['Time'].iloc[1] - d['Time'].iloc[0]).total_seconds() / 60.0
     return 0
 
+
 def aggregateHours(d):
-    """
-    Aggregates 'SVM' column by hour
-    """
+    # Aggregates the raw epoch-level SVM series to hourly mean activity values.
+    #
+    # Input column : SVM  (signal vector magnitude sum, 60-s epochs from the Actigraph)
+    #                Epoch interval must be <= 60 min (checked via timeBin).
+    #
+    # Method:
+    #   1. Floor each timestamp to its hour boundary
+    #      (e.g. 12:34 -> 12:00,  23:59 -> 23:00)
+    #   2. Group all epochs that share the same floored hour
+    #   3. Take the mean SVM across those epochs -> one value per hour
+    #
+    # Output: DataFrame with columns [Time (hour boundary), Activity (mean SVM)]
+    #
+    # Equivalent to R:
+    #   group_by(floor_date(Time, "hour")) %>% summarise(SVM = mean(SVM, na.rm=TRUE))
+
     delta = timeBin(d)
     if delta > 60:
         raise ValueError("aggregateHours: data is too coarse (greater than 60 minutes bins)")
-        
+
     d_copy = d.copy()
-    d_copy['hour_label'] = d_copy['Time'].dt.floor('H')
-    
-    # group by hour label and calculate mean
+    d_copy['hour_label'] = d_copy['Time'].dt.floor('h')
+
     agg_df = d_copy.groupby('hour_label')['SVM'].mean().reset_index()
     agg_df = agg_df.rename(columns={'hour_label': 'Time', 'SVM': 'Activity'})
-    
+
     return agg_df
 
+
 def dayByHourMatrix(df):
-    """
-    df: output of aggregateHours
-    Returns matrix with rows=Days, cols=Hours, elements=hourly activity summaries
-    """
+    # Reshapes the hourly long-format series into a [days x 24 hours] matrix.
+    #
+    # Input:  output of aggregateHours — one row per hour
+    # Output: numpy array shape (D, 24) where D = number of calendar days spanned,
+    #         plus the array of corresponding date labels.
+    #         Hours with no data (partial first/last days) are filled with NaN.
+    #
+    # The resulting matrix is the standard input format for all metric functions:
+    #   rows    = days  (day index, 0-based)
+    #   columns = hours (0 = midnight, 1 = 01:00, ..., 23 = 23:00)
+    #   values  = mean SVM activity for that hour on that day
+    #
+    # Equivalent to R:
+    #   reshape2::dcast(df, Day ~ Hour, value.var = "Activity")
+    # with an explicit reindex to ensure all 24 hour columns are present
+    # even when the first or last day has no data at certain hours.
+
     df_copy = df.copy()
     df_copy['Hour'] = df_copy['Time'].dt.hour
     df_copy['Date'] = df_copy['Time'].dt.date
-    
-    # Pivot to wide format
+
     m_df = df_copy.pivot(index='Date', columns='Hour', values='Activity')
-    
+    # guarantee all 24 columns; missing hours -> NaN
+    m_df = m_df.reindex(columns=range(24))
+    m_df.columns.name = None
+
     return m_df.values, m_df.index.values
 
 def rollingWindowInd(t, window, step):

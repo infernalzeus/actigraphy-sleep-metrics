@@ -5,12 +5,22 @@ from pathlib import Path
 
 def readParticipantCSV(path, fname):
     """
-    Read a single participant, do any necessary work on the dataframe
+    Read a single participant CSV and normalise columns.
+    Matches R: readParticipantCSV() in read-participant.R
     """
-    file_path = os.path.join(path, fname)
+    file_path = os.path.join(path, fname) if path else fname
     d = pd.read_csv(file_path)
-    # Ensure Time variable is datetime type (assuming GMT/UTC origin)
-    d['Time'] = pd.to_datetime(d['Time'], origin='1970-01-01', utc=True)
+
+    # Actigraph exports timestamps as "YYYY-MM-DD HH:MM:SS:mmm"
+    # (milliseconds delimited by ':' instead of '.') — normalise before parsing
+    d['Time'] = pd.to_datetime(
+        d['Time'].str.replace(r':(\d{3})$', r'.\1', regex=True)
+    )
+
+    # Map SVM_sum → SVM so downstream code matches the R column name convention
+    if 'SVM_sum' in d.columns and 'SVM' not in d.columns:
+        d = d.rename(columns={'SVM_sum': 'SVM'})
+
     return d
 
 def ds_accel_csv(acceldir, alloutdir=None, dsdir=None, col_timestamp=None, col_accel=None):

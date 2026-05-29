@@ -1,0 +1,2 @@
+fname,processing_timestamp,IS,IV,M10_hour,M10_mean_activity,L5_hour,L5_mean_activity
+test0000_60s_actigraph.csv,2026-05-29T08:04:51,0.07445897124755758,0.48940446121370484,9,73.71750442295094,1,57.892634067414946
