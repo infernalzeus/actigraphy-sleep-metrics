@@ -6,12 +6,13 @@ Step 2 reads an Actigraph CSV file of 60-second activity epochs and computes
 validated sleep-wake regularity metrics from it.  It is a Python translation of
 the R repository `sleep-wake-code-main` and produces identical numeric results.
 
-The two metric groups are:
+The metric groups are:
 
 | Group | Metrics | Source |
 |---|---|---|
 | `nonparametric` | IS, IV, M10, L5 | Witting et al. 1990; Van Someren et al. 1999 |
 | `periodogram` | Enright A_p, Chi-square Q_p | Sokolove & Bushell 1978; Tackenberg & Hughey 2021 |
+| `sri` | Sleep Regularity Index | Cole et al. 1992 (scoring); Phillips et al. 2017 (SRI) |
 
 ---
 
@@ -39,7 +40,11 @@ step2/
                     periodogram_ChiSquare()  Chi-square Q_p table
                     add_pValue_ChiSquare()   appends log p-values
 
+  sri.py            cole_kripke()            per-epoch sleep/wake scoring
+                    compute_SRI()            Sleep Regularity Index
+
   visualize.py      activityHeatmap()        seaborn heatmap figure
+                    sleepWakeRaster()        binary sleep/wake raster figure
                     generate_pdf_report()    multi-page PDF
 
   outputs/          <stem>_metrics.csv
@@ -352,6 +357,108 @@ becomes unreliable.
 
 ---
 
+### Metric 7 — Sleep Regularity Index (SRI)
+
+SRI measures how reproducible the sleep/wake pattern is from one day to the
+next.  Unlike every other metric in this pipeline, it operates on a **binary
+sleep/wake state per epoch**, not on continuous activity — so it needs a
+separate branch that works on the **full 60-second epoch series** (`SVM`) rather
+than the hourly `mat`.  Crucially, this is computed **from the data the pipeline
+already collects** — no GGIR / R step is required.
+
+**Relationship to other metrics:**
+SRI is **not** a function of M10 / L5 and shares no inputs with them.  M10 / L5
+describe the amplitude and timing of the *average* activity day; SRI describes
+*day-to-day reproducibility* of the *binary* sleep/wake state.  SRI is the close
+cousin of IS — both quantify regularity — but IS compares each day to the
+grand-average profile using continuous activity, whereas SRI compares each day
+to the *next* day using binary states.
+
+**Pipeline (compute_SRI in sri.py):**
+
+```
+Epoch DataFrame (Time, SVM)
+    |
+    | 1. reindex onto a complete 60-s grid   (gaps -> NaN)
+    v
+Regular SVM series
+    |
+    | 2. Cole-Kripke scoring  -> 0 (sleep) / 1 (wake) / NaN
+    v
+Binary state series
+    |
+    | 3. reshape to [days x 1440] aligned by clock-minute
+    |    (rows reindexed to consecutive calendar dates)
+    v
+State matrix  s[day, epoch]
+    |
+    | 4. compare each day to the next (same clock epoch)
+    v
+SRI  (scalar, -100 .. 100)
+```
+
+**Step 2 — Cole-Kripke sleep/wake scoring** (Cole et al. 1992, 1-minute epochs):
+
+```
+D_t = P * ( 106*A_{t-4} + 54*A_{t-3} + 58*A_{t-2} + 76*A_{t-1}
+          + 230*A_t + 74*A_{t+1} + 67*A_{t+2} )
+
+epoch t = SLEEP  if  D_t < 1,  else WAKE
+```
+
+- `A_t` = activity (SVM) at epoch t; neighbours span 4 epochs back to 2 forward.
+- `P` = 0.001 scale factor (the `scale` argument), threshold = 1.0.
+- Epochs whose SVM is NaN (gaps / non-wear) are scored NaN and excluded later.
+
+> **Calibration.** The Cole-Kripke constants were derived for zero-crossing /
+> PIM activity counts, not for Actigraph `SVM_sum`.  The *shape* of the
+> sleep/wake series (and hence SRI) is robust to the exact scale, but the
+> reported `pct_epochs_sleep` is a direct sanity check: if it is implausible for
+> the device, tune `scale` (or `threshold`) against a night of known sleep
+> timing.  This is the only device-dependent parameter in the calculation.
+
+**Step 3 — Clock-time alignment.**
+Each epoch is placed at column `epoch_of_day = second_of_day // 60` (0..1439) on
+its calendar-date row, so column *j* is always the same time of day on every row.
+Rows are reindexed to a complete run of consecutive dates, so a fully-missing day
+becomes an all-NaN row and is naturally excluded (adjacent rows are therefore
+guaranteed to be consecutive days).
+
+**Step 4 — SRI formula** (Phillips et al. 2017):
+
+```
+             1     M   N-1
+SRI = -100 + ─── * SUM SUM  200 * delta( s[i, j], s[i+1, j] )
+            V(N)  j=1  i=1
+```
+
+expressed operationally as:
+
+```
+SRI = 200 * (matching epoch-pairs / valid epoch-pairs) - 100
+```
+
+- `s[i, j]`   = sleep(0)/wake(1) state at epoch j on day i
+- `delta`     = 1 if the two states match, else 0
+- `M`         = epochs per day (1440 for 60-s epochs)
+- `N`         = number of days
+- valid epoch-pairs = pairs where **both** days have a scored (non-NaN) state;
+  the denominator is reduced to this count so gaps do not bias the result.
+
+**Interpretation:**
+- SRI = +100 : identical sleep/wake pattern every day (perfectly regular)
+- SRI =    0 : no better than chance
+- SRI = -100 : state flips exactly 24 h later every day (perfectly irregular)
+
+**Outputs:**
+- `SRI` — the index (−100 .. 100)
+- `n_days`, `n_valid_epoch_pairs` — coverage of the comparison
+- `pct_epochs_sleep` — % of scored epochs classified as sleep (classifier check)
+- `epoch_sec`, `classifier`, `ck_scale`, `ck_threshold` — scoring provenance
+- `states_matrix`, `dates` — binary matrix used for the PDF sleep/wake raster
+
+---
+
 ## Output Files
 
 ### `<stem>_metrics.csv`
@@ -380,6 +487,21 @@ One row per tested period.  Columns:
 | `ChiSq_Qp` | chi-square statistic Q_p |
 | `log_Pvalue` | log p-value under chi-square null hypothesis |
 
+### `<stem>_sri.csv`
+
+One row per input file.  Columns:
+
+| Column | Description |
+|---|---|
+| `fname` | source filename |
+| `SRI` | Sleep Regularity Index (−100 .. 100) |
+| `n_days` | calendar days spanned |
+| `n_valid_epoch_pairs` | epoch-pairs actually compared |
+| `pct_epochs_sleep` | % of scored epochs classified as sleep |
+| `epoch_sec` | epoch length used (seconds) |
+| `classifier` | sleep/wake classifier (`Cole-Kripke`) |
+| `ck_scale`, `ck_threshold` | Cole-Kripke parameters used |
+
 ### `<stem>_report.pdf`
 
 Multi-page PDF:
@@ -388,5 +510,8 @@ Multi-page PDF:
 |---|---|
 | 1 | Activity heatmap — M[days x 24 h], midnight-centred |
 | 2 | Non-parametric metrics table (IS, IV, M10, L5) |
-| 3 | Enright periodogram line plot |
-| 4 | Chi-square periodogram — Q_p and log p-value |
+| 3 | SRI summary table + sleep/wake raster |
+| 4 | Enright periodogram line plot |
+| 5 | Chi-square periodogram — Q_p and log p-value |
+
+(Pages for measure groups that were not run are omitted.)

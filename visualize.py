@@ -76,12 +76,58 @@ def activityHeatmap(mat_df, title_str="Activity Heatmap", dates=None):
     return fig
 
 
+def sleepWakeRaster(states_mat, title_str="Sleep/Wake Raster", dates=None):
+    # Raster (double-plotted style) of the binary sleep/wake matrix used by SRI.
+    #
+    # states_mat : numpy array [days x epochs-per-day], 0 = sleep, 1 = wake, NaN = no data
+    # dates      : optional sequence of row (date) labels
+    #
+    # Columns are rolled right by half a day so that noon is on the left and
+    # midnight is centred — matching activityHeatmap so the two pages line up.
+    days, M = states_mat.shape
+
+    rolled = np.roll(states_mat, shift=M // 2, axis=1)
+
+    fig_h = max(4, days * 0.38)
+    fig, ax = plt.subplots(figsize=(12, fig_h))
+    ax.set_facecolor('#cccccc')     # NaN (no-data) cells show through as grey
+
+    cmap = plt.matplotlib.colors.ListedColormap(['#1f3b6f', '#f4d35e'])  # sleep, wake
+    cmap.set_bad('#cccccc')
+    masked = np.ma.masked_invalid(rolled)
+    ax.imshow(masked, aspect='auto', cmap=cmap, vmin=0, vmax=1,
+              interpolation='nearest')
+
+    # x ticks every 3 hours; display col 0 = noon
+    ticks_hr = np.arange(0, 24, 3)
+    ax.set_xticks(ticks_hr * (M // 24))
+    ax.set_xticklabels([str((h + 12) % 24) for h in ticks_hr], fontsize=8)
+    ax.set_xlabel("Hour of Day")
+
+    y_labels = [str(d) for d in dates] if dates is not None else [str(i + 1) for i in range(days)]
+    ax.set_yticks(np.arange(days))
+    ax.set_yticklabels(y_labels, fontsize=8)
+    ax.set_ylabel("Date")
+
+    # legend
+    handles = [plt.matplotlib.patches.Patch(color='#1f3b6f', label='Sleep'),
+               plt.matplotlib.patches.Patch(color='#f4d35e', label='Wake'),
+               plt.matplotlib.patches.Patch(color='#cccccc', label='No data')]
+    ax.legend(handles=handles, loc='upper right', bbox_to_anchor=(1.14, 1.0),
+              fontsize=8, frameon=True)
+
+    ax.set_title(title_str)
+    fig.tight_layout()
+    return fig
+
+
 def generate_pdf_report(pdf_path, mat, dates, fname, results, pgrams,
-                        daily_results=None):
+                        daily_results=None, sri_results=None):
     """
     Write a multi-page PDF report:
       p1      — activity heatmap
       p2      — non-parametric scalar metrics table  (when results is non-empty)
+      p(sri)  — Sleep Regularity Index summary + raster (when sri_results given)
       p3+     — per-day M10 / L5 table, paginated    (when daily_results is non-empty)
       p(n)    — Enright periodogram plot             (when 'enright' in pgrams)
       p(n+1)  — Chi-square periodogram plot          (when 'chisquare' in pgrams)
@@ -123,6 +169,58 @@ def generate_pdf_report(pdf_path, mat, dates, fname, results, pgrams,
             ax.set_title('Non-Parametric Metrics', fontsize=13, pad=16)
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
+
+        # ── page (sri): Sleep Regularity Index summary + raster ──────────────
+        if sri_results:
+            sri = sri_results.get('SRI', np.nan)
+
+            if sri is None or (isinstance(sri, float) and np.isnan(sri)):
+                sri_str, interp = 'N/A', 'insufficient data'
+            else:
+                sri_str = f"{sri:.2f}"
+                if   sri >= 80: interp = 'very regular'
+                elif sri >= 60: interp = 'regular'
+                elif sri >= 40: interp = 'moderately regular'
+                elif sri >= 20: interp = 'irregular'
+                else:           interp = 'very irregular'
+
+            summary_rows = [
+                ['Sleep Regularity Index (SRI)', sri_str],
+                ['Interpretation',               interp],
+                ['Range',                        '-100 (flips daily) to +100 (identical)'],
+                ['Days',                         str(sri_results.get('n_days', '—'))],
+                ['Valid epoch-pairs compared',   f"{sri_results.get('n_valid_epoch_pairs', 0):,}"],
+                ['Epochs scored as sleep',       f"{sri_results.get('pct_epochs_sleep', float('nan')):.1f} %"],
+                ['Epoch length',                 f"{sri_results.get('epoch_sec', '—')} s"],
+                ['Sleep/wake classifier',        sri_results.get('classifier', '—')],
+                ['Cole-Kripke scale (P)',        str(sri_results.get('ck_scale', '—'))],
+                ['Cole-Kripke threshold',        str(sri_results.get('ck_threshold', '—'))],
+            ]
+
+            fig, ax = plt.subplots(figsize=(8, 0.5 + 0.45 * len(summary_rows)))
+            ax.axis('off')
+            tbl = ax.table(cellText=summary_rows,
+                           colLabels=['Metric', 'Value'],
+                           loc='center', cellLoc='left')
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(11)
+            tbl.scale(1, 1.8)
+            ax.set_title('Sleep Regularity Index', fontsize=13, pad=16)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+            # raster of the binary sleep/wake matrix
+            states_mat = sri_results.get('states_matrix')
+            if states_mat is not None and getattr(states_mat, 'size', 0) \
+                    and not np.all(np.isnan(states_mat)):
+                sri_dates = sri_results.get('dates')
+                fig = sleepWakeRaster(
+                    states_mat,
+                    title_str=f"Sleep/Wake Raster (Cole-Kripke)\n{fname}",
+                    dates=sri_dates,
+                )
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
 
         # ── page 3+: per-day M10 / L5 table (paginated) ─────────────────────
         if daily_results:

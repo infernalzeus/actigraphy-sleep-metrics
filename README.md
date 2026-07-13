@@ -65,7 +65,7 @@ python -m cli read <path/to/input_file.csv> [--measures GROUP] [--verbose]
 | Argument | Required | Description |
 |---|---|---|
 | `input_file` | yes | Path to the Actigraph CSV file |
-| `--measures GROUP` | no | `nonparametric`, `periodogram`, or `temp_metrics`. Omit to run all three. |
+| `--measures GROUP` | no | `nonparametric`, `periodogram`, `temp_metrics`, or `sri`. Omit to run all four. |
 | `--verbose` | no | Print step-by-step progress and computed values |
 
 ### Examples
@@ -92,6 +92,12 @@ Run only per-day M10 / L5:
 
 ```bash
 python -m cli read "CD000_left wrist_60s.csv" --measures temp_metrics --verbose
+```
+
+Run only the Sleep Regularity Index:
+
+```bash
+python -m cli read "CD000_left wrist_60s.csv" --measures sri --verbose
 ```
 
 ---
@@ -132,6 +138,32 @@ Missing hours are filled using Last Observation Carried Forward (LOCF) before
 filtering so that the rolling mean is always defined.  Days with no recorded
 data at all are reported as `—` / `None`.
 
+### `sri`
+
+Sleep Regularity Index — the probability that two epochs 24 h apart share the
+same sleep/wake state, rescaled to a percentage. Computed **directly from the
+epoch-level `SVM_sum` series** (no GGIR / R dependency): each 60-s epoch is
+scored sleep/wake with the Cole-Kripke algorithm, aligned into a
+`days × epochs-per-day` matrix by clock time, and each day is compared to the
+next.
+
+| Metric | Range | Interpretation |
+|---|---|---|
+| SRI | −100 – 100 | +100 = identical sleep/wake pattern every day; 0 = chance; −100 = state flips exactly 24 h later |
+| pct_epochs_sleep | 0 – 100 | Share of scored epochs classified as sleep — a sanity check on the classifier |
+
+SRI is **independent of M10 / L5** (those describe the average activity day;
+SRI describes day-to-day reproducibility of the binary sleep/wake state). It is
+the close cousin of Interdaily Stability (IS), but compares each day to the
+*next* day rather than to the grand-average profile.
+
+> **Calibration note.** The Cole-Kripke constants were validated on activity
+> counts from older devices, not on Actigraph `SVM_sum`. The *shape* of the
+> sleep/wake series (and thus SRI) is robust to the exact scale, but if the
+> reported `pct_epochs_sleep` is implausible for your device, tune the `scale`
+> (or `threshold`) argument of `compute_SRI` against a night of known sleep
+> timing.
+
 ### `periodogram`
 
 Rhythm-period analysis over candidate periods 14 – 34 hours.
@@ -154,6 +186,7 @@ file stem.
 | `<stem>_nonparametric.csv` | `nonparametric` | IS, IV, aggregate M10 / L5 — one row per file |
 | `<stem>_daily.csv` | `temp_metrics` | Per-day M10 / L5 — one row per recording day |
 | `<stem>_periodogram.csv` | `periodogram` | Enright A_p and chi-square Q_p for periods 14 – 34 h |
+| `<stem>_sri.csv` | `sri` | Sleep Regularity Index + scoring summary — one row per file |
 | `<stem>_report.pdf` | all groups | Multi-page PDF — see below |
 
 ### PDF report page order
@@ -162,7 +195,8 @@ file stem.
 |---|---|---|
 | 1 | Activity heatmap (noon left, midnight centre) | always |
 | 2 | Scalar metrics summary table | `nonparametric` |
-| 3+ | Per-day M10 / L5 table (paginated, 30 rows/page) | `temp_metrics` |
+| next | SRI summary table + sleep/wake raster | `sri` |
+| next+ | Per-day M10 / L5 table (paginated, 30 rows/page) | `temp_metrics` |
 | next | Enright periodogram plot | `periodogram` |
 | last | Chi-square periodogram + log p-value plot | `periodogram` |
 
@@ -180,8 +214,8 @@ step2/
 ├── nonparametric.py    IS, IV, aggregate compute_M10, compute_L5
 ├── temp_metrics.py     Per-day oneDay_M10, oneDay_L5, compute_daily_metrics
 ├── periodogram.py      Enright and chi-square periodograms
-├── visualize.py        Activity heatmap, PDF report generator
-├── sri.py              Deprecated — re-exports from temp_metrics for compatibility
+├── visualize.py        Activity heatmap, sleep/wake raster, PDF report generator
+├── sri.py              Sleep Regularity Index — Cole-Kripke scoring, compute_SRI
 ├── requirements.txt    pip dependencies
 └── outputs/            All generated CSV and PDF files (created on first run)
 ```
@@ -210,3 +244,6 @@ formula, which input columns they use, and what each output column means.
 - Van Someren et al. (1999). *Chronobiology International*, 16(4), 505-518 — M10, L5
 - Sokolove & Bushell (1978). *Journal of Theoretical Biology*, 72(1), 131-160 — Enright periodogram
 - Tackenberg & Hughey (2021). *PLoS Computational Biology*, 17(1), e1008567 — chi-square periodogram
+- Cole et al. (1992). *Sleep*, 15(5), 461-469 — Cole-Kripke sleep/wake scoring
+- Phillips et al. (2017). *Scientific Reports*, 7, 3216 — Sleep Regularity Index (SRI)
+- Fischer et al. (2021). *PMC8503839* — SRI / IS methods review

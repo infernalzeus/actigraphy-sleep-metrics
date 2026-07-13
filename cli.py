@@ -10,8 +10,9 @@ Measure groups
     nonparametric   IS, IV, aggregate M10 / L5
     periodogram     Enright A_p and chi-square Q_p for periods 14-34 h
     temp_metrics    Per-day M10 / L5 (noon-to-noon window)
+    sri             Sleep Regularity Index (Cole-Kripke sleep/wake scoring)
 
-    Omit --measures to run all three groups.
+    Omit --measures to run all four groups.
 
 Examples
 --------
@@ -19,14 +20,16 @@ Examples
     python -m cli read data.csv --measures nonparametric --verbose
     python -m cli read data.csv --measures periodogram
     python -m cli read data.csv --measures temp_metrics --verbose
+    python -m cli read data.csv --measures sri --verbose
 
 Outputs (written to step2/outputs/)
 ------------------------------------
     <stem>_nonparametric.csv  scalar non-parametric measures (IS, IV, M10, L5)
     <stem>_daily.csv          per-day M10 / L5 table
     <stem>_periodogram.csv    Enright + chi-square periodogram tables
+    <stem>_sri.csv            Sleep Regularity Index + scoring summary
     <stem>_report.pdf         multi-page PDF: heatmap, metrics table,
-                              per-day table, periodogram plots
+                              per-day table, periodogram plots, SRI page
 """
 import argparse
 import sys
@@ -60,9 +63,10 @@ from periodogram    import (periodogram_Enright, periodogram_ChiSquare,
                              add_pValue_ChiSquare)
 from visualize      import activityHeatmap, generate_pdf_report
 from temp_metrics   import compute_daily_metrics
+from sri            import compute_SRI
 
 # ── valid measure group names ─────────────────────────────────────────────────
-MEASURE_GROUPS = ('nonparametric', 'periodogram', 'temp_metrics')
+MEASURE_GROUPS = ('nonparametric', 'periodogram', 'temp_metrics', 'sri')
 
 
 # ── argument parser ───────────────────────────────────────────────────────────
@@ -81,7 +85,8 @@ def build_parser():
                     choices=MEASURE_GROUPS,
                     default=None,
                     metavar='GROUP',
-                    help='nonparametric | periodogram | temp_metrics  (omit to run all)')
+                    help='nonparametric | periodogram | temp_metrics | sri  '
+                         '(omit to run all)')
     rp.add_argument('--verbose', action='store_true',
                     help='Print progress and computed values to stdout')
     return parser
@@ -103,6 +108,7 @@ def run_read(args):
     run_nonparametric = args.measures in (None, 'nonparametric')
     run_periodogram   = args.measures in (None, 'periodogram')
     run_temp_metrics  = args.measures in (None, 'temp_metrics')
+    run_sri           = args.measures in (None, 'sri')
 
     outputs_dir = Path(_pkg) / 'outputs'
     outputs_dir.mkdir(exist_ok=True)
@@ -130,6 +136,7 @@ def run_read(args):
     results      = {}   # scalar metrics   -> nonparametric CSV + PDF summary table
     daily_rows   = []   # per-day metrics  -> daily CSV + PDF daily table
     pgrams       = {}   # periodogram DFs  -> periodogram CSV + PDF plots
+    sri_results  = {}   # SRI + scoring    -> sri CSV + PDF SRI page
 
     if run_nonparametric:
         vprint(v, "[3/4] Computing non-parametric metrics...")
@@ -185,6 +192,14 @@ def run_read(args):
             print(f"      Chi-sq   peak: period = {int(peak_c['Period'])} h, "
                   f"Q_p = {peak_c['Value']:.4f}")
 
+    if run_sri:
+        vprint(v, "[3/4] Computing Sleep Regularity Index (Cole-Kripke)...")
+        # SRI is computed straight from the epoch-level SVM series `d` — the same
+        # data every other metric is derived from — so no GGIR / R step is needed.
+        # It does NOT use the hourly `mat`; it needs full 60-s epoch resolution.
+        epoch_sec = int(round(delta * 60))
+        sri_results = compute_SRI(d, epoch_sec=epoch_sec, verbose=v)
+
     # ── 4. save outputs ───────────────────────────────────────────────────────
     vprint(v, "[4/4] Writing outputs...")
 
@@ -218,6 +233,15 @@ def run_read(args):
         pg_out.to_csv(pg_csv, index=False)
         vprint(v, f"      Periodogram CSV    -> {pg_csv}")
 
+    if sri_results:
+        # scalar summary only — drop the bulky arrays used for plotting
+        sri_row = {'fname': input_path.name}
+        sri_row.update({k: val for k, val in sri_results.items()
+                        if k not in ('states_matrix', 'dates')})
+        sri_csv = outputs_dir / f"{stem}_sri.csv"
+        pd.DataFrame([sri_row]).to_csv(sri_csv, index=False)
+        vprint(v, f"      SRI CSV            -> {sri_csv}")
+
     pdf_path = outputs_dir / f"{stem}_report.pdf"
     generate_pdf_report(
         pdf_path=str(pdf_path),
@@ -227,6 +251,7 @@ def run_read(args):
         results=results,
         daily_results=daily_rows,
         pgrams=pgrams,
+        sri_results=sri_results,
     )
     vprint(v, f"      PDF report         -> {pdf_path}")
 
