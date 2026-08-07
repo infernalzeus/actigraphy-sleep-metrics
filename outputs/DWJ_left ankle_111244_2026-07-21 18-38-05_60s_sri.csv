@@ -1,0 +1,2 @@
+fname,SRI,n_days,n_valid_epoch_pairs,pct_epochs_sleep,epoch_sec,classifier,ck_scale,ck_threshold,activity_normalization
+DWJ_left ankle_111244_2026-07-21 18-38-05_60s.csv,8.970917225950785,8,8940,36.55105973025048,60,Cole-Kripke,0.001,1.0,SVM_sum/epoch_sec (per-second)

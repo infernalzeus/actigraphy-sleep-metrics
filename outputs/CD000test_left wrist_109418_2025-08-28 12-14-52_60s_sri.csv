@@ -1,2 +1,0 @@
-fname,SRI,n_days,n_valid_epoch_pairs,pct_epochs_sleep,epoch_sec,classifier,ck_scale,ck_threshold,activity_normalization
-CD000test_left wrist_109418_2025-08-28 12-14-52_60s.csv,65.11009138934946,20,25933,61.96982427939941,60,Cole-Kripke,0.001,1.0,SVM_sum/epoch_sec (per-second)
