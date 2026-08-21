@@ -7,13 +7,13 @@ import seaborn as sns
 from datetime import datetime
 
 def activityHeatmap(mat_df, title_str="Activity Heatmap", dates=None):
-    # Produces a heatmap of mean-hourly SVM activity with noon on the left
+    # Produces a heatmap of mean-hourly SVM activity, midnight at the left
     # and midnight centred, matching the convention used in the R visualisation.
     #
     # mat_df : numpy array [days x 24] of mean hourly SVM_sum (Activity column)
     # dates  : optional sequence of date labels for the Y-axis (length = days)
     #
-    # Layout:  columns are rolled right by 12 so that hour 12 (noon) becomes
+    # Layout:  columns run 00:00 -> 23:00 left to right.
     # column 0 and hour 0 (midnight) falls in the middle of the x-axis:
     #   display col 0  = data hour 12  (noon)
     #   display col 12 = data hour  0  (midnight)
@@ -32,11 +32,12 @@ def activityHeatmap(mat_df, title_str="Activity Heatmap", dates=None):
 
     days = mat_df.shape[0]
 
-    # roll columns right by 12: hour 12 moves to column 0
-    mat_temp = np.roll(mat_df, shift=12, axis=1)
+    # Midnight-origin layout: column 0 is hour 0, so the axis reads like a clock.
+    # (It used to be rolled by 12 to centre midnight, which put 00:00 in the
+    # middle of the plot and made the times hard to read.)
+    mat_temp = np.asarray(mat_df)
 
-    # x-axis labels: col 0 = hour 12, col 1 = hour 13, ..., col 12 = hour 0, ...
-    x_labels = [str((h + 12) % 24) for h in range(24)]
+    x_labels = [f"{h:02d}" for h in range(24)]
 
     # NaN mask — partial first/last recording days where no data was collected
     nan_mask = np.isnan(mat_temp)
@@ -82,11 +83,11 @@ def sleepWakeRaster(states_mat, title_str="Sleep/Wake Raster", dates=None):
     # states_mat : numpy array [days x epochs-per-day], 0 = sleep, 1 = wake, NaN = no data
     # dates      : optional sequence of row (date) labels
     #
-    # Columns are rolled right by half a day so that noon is on the left and
-    # midnight is centred — matching activityHeatmap so the two pages line up.
+    # Columns run 00:00 -> 23:00 (midnight origin) so the axis reads as a clock;
+    # this matches the activity heatmap so the two pages line up.
     days, M = states_mat.shape
 
-    rolled = np.roll(states_mat, shift=M // 2, axis=1)
+    rolled = np.asarray(states_mat)   # midnight-origin (no roll)
 
     fig_h = max(4, days * 0.38)
     fig, ax = plt.subplots(figsize=(12, fig_h))
@@ -98,10 +99,10 @@ def sleepWakeRaster(states_mat, title_str="Sleep/Wake Raster", dates=None):
     ax.imshow(masked, aspect='auto', cmap=cmap, vmin=0, vmax=1,
               interpolation='nearest')
 
-    # x ticks every 3 hours; display col 0 = noon
+    # x ticks every 3 hours; display col 0 = midnight
     ticks_hr = np.arange(0, 24, 3)
     ax.set_xticks(ticks_hr * (M // 24))
-    ax.set_xticklabels([str((h + 12) % 24) for h in ticks_hr], fontsize=8)
+    ax.set_xticklabels([f"{h:02d}:00" for h in ticks_hr], fontsize=8)
     ax.set_xlabel("Hour of Day")
 
     y_labels = [str(d) for d in dates] if dates is not None else [str(i + 1) for i in range(days)]
