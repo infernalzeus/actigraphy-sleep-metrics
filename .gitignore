@@ -1,5 +1,10 @@
+# Generated per-recording outputs (participant-level; do not publish)
+outputs/
+
 .DS_Store
 __pycache__/
 *.py[cod]
 .pytest_cache/
-outputs/
+.venv/
+venv/
+.env
