@@ -145,15 +145,20 @@ def generate_pdf_report(pdf_path, mat, dates, fname, results, pgrams,
             _metric_labels = {
                 'IS':               'Interdaily Stability (IS)',
                 'IV':               'Intradaily Variability (IV)',
-                'M10_hour':         'M10 onset hour',
+                'M10_onset_time':   'M10 onset time',
                 'M10_mean_activity':'M10 mean activity',
-                'L5_hour':          'L5 onset hour',
+                'L5_onset_time':    'L5 onset time',
                 'L5_mean_activity': 'L5 mean activity',
             }
             rows = []
             for k, v in results.items():
                 label = _metric_labels.get(k, k)
-                val   = f"{v:.4f}" if isinstance(v, float) else str(int(v))
+                if isinstance(v, (float, np.floating)):
+                    val = f"{v:.4f}" if np.isfinite(v) else 'NA'
+                elif isinstance(v, (int, np.integer)):
+                    val = str(int(v))
+                else:
+                    val = str(v)
                 rows.append([label, val])
 
             fig, ax = plt.subplots(figsize=(8, 0.5 + 0.45 * len(rows)))

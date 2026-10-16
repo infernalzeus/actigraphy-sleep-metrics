@@ -1,9 +1,61 @@
 import pandas as pd
 import os
 import numpy as np
+import json
 from pathlib import Path
+from ck_input import attach_ck_input
 
-def readParticipantCSV(path, fname):
+
+_WINDOWS_TIMEZONES = {
+    "GMT Standard Time": "Europe/London",
+    "GMT Daylight Time": "Europe/London",
+}
+
+
+def _read_metadata(file_path):
+    metadata_path = Path(file_path).with_suffix('.metadata.json')
+    if not metadata_path.exists():
+        return {}
+    return json.loads(metadata_path.read_text(encoding='utf-8'))
+
+
+def _metadata_timezone(metadata, override=None):
+    if override:
+        return override
+    timezone = (
+        metadata.get('preprocessing', {}).get('timezone')
+        or metadata.get('recording', {}).get('time_zone')
+    )
+    return _WINDOWS_TIMEZONES.get(timezone, timezone)
+
+
+def _localize_time(d, timezone):
+    """Attach a real timezone without changing device wall-clock timestamps."""
+    d.attrs['timezone'] = timezone
+    d.attrs['dst_excluded_dates'] = []
+    if not timezone:
+        return d
+    try:
+        localized = d['Time'].dt.tz_localize(
+            timezone, ambiguous='raise', nonexistent='raise'
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot localize device timestamps to {timezone}: {exc}. "
+            "Ambiguous or nonexistent naive times must be resolved upstream."
+        ) from exc
+    d['Time'] = localized
+    offsets = localized.map(lambda value: value.utcoffset())
+    offset_counts = pd.DataFrame({
+        'date': localized.dt.date,
+        'offset': offsets,
+    }).groupby('date')['offset'].nunique()
+    d.attrs['dst_excluded_dates'] = [
+        date for date, count in offset_counts.items() if count > 1
+    ]
+    return d
+
+def readParticipantCSV(path, fname, timezone=None):
     """
     Read a single participant CSV and normalise columns.
     Matches R: readParticipantCSV() in read-participant.R
@@ -21,6 +73,10 @@ def readParticipantCSV(path, fname):
     if 'SVM_sum' in d.columns and 'SVM' not in d.columns:
         d = d.rename(columns={'SVM_sum': 'SVM'})
 
+    metadata = _read_metadata(file_path)
+    d = attach_ck_input(d, file_path)
+    d = _localize_time(d, _metadata_timezone(metadata, timezone))
+    d.attrs['count_method'] = metadata.get('preprocessing', {}).get('count_method')
     return d
 
 def ds_accel_csv(acceldir, alloutdir=None, dsdir=None, col_timestamp=None, col_accel=None):

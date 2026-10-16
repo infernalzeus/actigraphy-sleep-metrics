@@ -47,7 +47,7 @@ step2/
                     sleepWakeRaster()        binary sleep/wake raster figure
                     generate_pdf_report()    multi-page PDF
 
-  outputs/          <stem>_metrics.csv
+  outputs/          <stem>_nonparametric.csv
                     <stem>_periodogram.csv
                     <stem>_report.pdf
 ```
@@ -58,7 +58,7 @@ step2/
 
 ### File format
 
-Actigraph ActiLife export, 60-second epoch, CSV.
+Step 1 actigraphy output, 60-second epoch, CSV.
 
 ### Columns used by Step 2
 
@@ -113,15 +113,17 @@ Hourly DataFrame  (~456 rows x 2 cols: Time, Activity)
     v
 Activity Matrix  [20 days x 24 hours]  numpy float64
     |
-    +-- interdailyStability()  -> IS  (scalar)
-    +-- intradailyVariability() -> IV  (scalar)
-    +-- compute_M10()           -> M10 hour, M10 mean activity
-    +-- compute_L5()            -> L5 hour,  L5 mean activity
+    +-- interdailyStability()   -> IS
+    +-- intradailyVariability() -> IV
     +-- periodogram_Enright()   -> DataFrame [21 x 2]: Period, Enright_Value
     +-- periodogram_ChiSquare() -> DataFrame [21 x 3]: Period, ChiSq_Qp, log_Pvalue
     |
+Minute-level local-time profile
+    +-- compute_M10()           -> M10 onset, M10 mean activity
+    +-- compute_L5()            -> L5 onset, L5 mean activity
+    |
     v
-outputs/<stem>_metrics.csv
+outputs/<stem>_nonparametric.csv
 outputs/<stem>_periodogram.csv
 outputs/<stem>_report.pdf
 ```
@@ -224,29 +226,21 @@ IV =  ────────────────────────�
 
 M10 identifies the 10-hour window of peak activity, averaged across all days.
 
-**Inputs from matrix M:**
-- Column means: X_h = mean(M[:, h])  for h = 0..23
-  (mean activity at each hour of the day, collapsed across all recording days)
+**Input:** the average 24-hour minute profile, formed by averaging valid
+observations at the same local clock minute across recording days.
 
 **Algorithm:**
 
-1. Apply a **bidirectional circular rolling mean** of width 10 to X_h:
+1. Evaluate every permitted start minute on the circular 24-hour profile
+   (one-minute resolution by default).
+2. For each start, calculate the mean of the exact next 600 minutes.
+3. M10 onset is the start of the window with the highest complete-window mean.
 
-   ```
-   forward  f2[h] = mean( X_h[h], X_h[h+1], ..., X_h[h+9] )   (circular)
-   backward f1[h] = mean( X_h[h-9], ..., X_h[h-1], X_h[h] )   (circular)
-   combined  f[h] = 0.5 * (f1[h] + f2[h])
-   ```
-
-   Bidirectionality removes the phase bias that a one-sided filter would
-   introduce — the identified window is centred on the reported hour.
-   Circular indexing means the window wraps across midnight (23:00 -> 00:00).
-
-2. M10 onset = the hour h with the **highest** combined rolling mean f[h]
-3. M10 mean  = that highest value
+Window length and search resolution are configurable. Missing minutes are not
+imputed; if no complete candidate window exists, the result is unavailable.
 
 **Outputs:**
-- `M10_hour` — clock hour (0–23) at which the most-active window begins
+- `M10_onset_time` — local clock time (`HH:MM`) at which the window begins
 - `M10_mean_activity` — mean SVM within that 10-hour window, across all days
 
 ---
@@ -255,11 +249,11 @@ M10 identifies the 10-hour window of peak activity, averaged across all days.
 
 L5 identifies the 5-hour window of minimum activity — the rest/sleep window.
 
-**Inputs and algorithm:** identical to M10 but with window width 5 and taking
-the **lowest** rather than highest rolling mean.
+**Input and algorithm:** identical to M10 but using an exact 300-minute window
+and taking the **lowest** complete-window mean.
 
 **Outputs:**
-- `L5_hour` — clock hour at which the least-active (rest) window begins
+- `L5_onset_time` — local clock time (`HH:MM`) at which the rest window begins
 - `L5_mean_activity` — mean SVM within that 5-hour window, across all days
 
 **Relative amplitude (RA)** — not computed here but commonly derived as:
@@ -461,7 +455,7 @@ SRI = 200 * (matching epoch-pairs / valid epoch-pairs) - 100
 
 ## Output Files
 
-### `<stem>_metrics.csv`
+### `<stem>_nonparametric.csv`
 
 One row per input file.  Columns:
 
@@ -471,10 +465,12 @@ One row per input file.  Columns:
 | `processing_timestamp` | ISO-8601 timestamp of when the run completed |
 | `IS` | inter-daily stability (0–1) |
 | `IV` | intra-daily variability (0–2) |
-| `M10_hour` | hour of day (0–23) at which the most-active 10-h window starts |
+| `M10_onset_time` | local clock time at which the most-active window starts |
 | `M10_mean_activity` | mean SVM within that window |
-| `L5_hour` | hour of day (0–23) at which the least-active 5-h window starts |
+| `L5_onset_time` | local clock time at which the least-active window starts |
 | `L5_mean_activity` | mean SVM within that window |
+| `m_window_hours`, `l_window_hours` | window lengths used |
+| `mxlx_resolution_minutes` | search resolution used |
 
 ### `<stem>_periodogram.csv`
 

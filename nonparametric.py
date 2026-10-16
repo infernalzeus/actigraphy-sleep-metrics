@@ -82,7 +82,7 @@ def LOCF_NA(x):
     return out
 
 
-def intradailyVariability(mat_df, LOCF=True):
+def intradailyVariability(mat_df, LOCF=False):
     # Computes intra-daily variability (IV).
     # See W. Witting, I.H. Kwa, P. Eikelenboom, M. Mirmiran, D.F. Swaab,
     #   Alterations in the circadian rest-activity rhythm in aging and
@@ -125,23 +125,32 @@ def intradailyVariability(mat_df, LOCF=True):
         # replace internal NaN values with last valid observation
         X_v = LOCF_NA(X_v)
 
-    # remove remaining NaNs (leading/trailing only after LOCF)
-    X_v = X_v[~np.isnan(X_v)]
-
-    if len(X_v) == 0:
+    finite = np.isfinite(X_v)
+    valid_positions = np.flatnonzero(finite)
+    if valid_positions.size:
+        X_v = X_v[valid_positions[0]:valid_positions[-1] + 1]
+        finite = np.isfinite(X_v)
+    valid_values = X_v[finite]
+    if len(valid_values) < 2:
         return np.nan
 
-    X_bar = np.mean(X_v)
-    N     = len(X_v)
-
-    # numerical first derivative of the time series
-    dX_v = np.diff(X_v)
+    X_bar = np.mean(valid_values)
+    N = len(valid_values)
+    if LOCF:
+        X_v = X_v[finite]
+        dX_v = np.diff(X_v)
+    else:
+        # Witting's equation assumes one uninterrupted sequence. Partial first
+        # and last days are trimmed; internal gaps return NA rather than being
+        # imputed or joined across.
+        if not finite.all():
+            return np.nan
+        dX_v = np.diff(X_v)
 
     # numerator / denominator of Eq. 2 in Witting et al., 1990
     numer = N       * np.sum(dX_v ** 2)
-    denom = (N - 1) * np.sum((X_bar - X_v) ** 2)
-
-    return numer / denom
+    denom = (N - 1) * np.sum((X_bar - valid_values) ** 2)
+    return numer / denom if denom > 0 else np.nan
 
 
 # ── Rolling-mean filter helpers ────────────────────────────────────────────────
@@ -201,76 +210,72 @@ def _filterHour_ForwardBack(x, n):
     })
 
 
-# ── Multi-day (aggregate) M10 / L5 ────────────────────────────────────────────
+# ── Canonical minute-level aggregate Mx / Lx ─────────────────────────────────
 
-def compute_M10(X_m):
-    # Computes M10: the onset hour and mean activity of the most active
-    # 10-consecutive-hour window, averaged across all recording days.
-    # See E.J. van Someren, D.F. Swaab, C.C. Colenda, W. Cohen,
-    #   W.V. McCall, P.B. Rosenquist, Bright light therapy: improved
-    #   sensitivity to its effects on rest-activity rhythms in Alzheimer
-    #   patients by application of nonparametric methods.
-    #   Chronobiology International, 16(4), 1999, pp. 505-518.
-    #
-    # Input column (raw CSV)  : SVM_sum  — signal vector magnitude sum per 60-s epoch
-    # Column after io.py      : SVM      (SVM_sum renamed)
-    # Column after aggregation: Activity — mean(SVM) per calendar hour
-    # Matrix input            : X_m[d, h] = Activity for day d, hour h
-    #                           shape (D, 24), NaN for hours with no recording
-    #
-    # Algorithm:
-    #   1. Compute X_h = mean(X_m[:, h]) — mean Activity at each hour across all days
-    #   2. Apply the bidirectional 11-hour rolling mean to X_h (circular).
-    #      Window width 11 is used so that the identified hour is the exact
-    #      midpoint of a 10-hour active window (±5 hours either side),
-    #      matching the R implementation which uses filterHour_ForwardBack(X_h, 11).
-    #   3. M10 onset = the hour h with the HIGHEST rolling mean value
-    #   4. M10 mean  = that highest rolling mean value
+def _clock_minute_profile(data, excluded_dates=()):
+    """Average activity for each local clock minute, without imputation."""
+    required = {'Time', 'SVM'}
+    if not required.issubset(data.columns):
+        raise ValueError("Mx/Lx requires Time and SVM columns.")
+    frame = data[['Time', 'SVM']].dropna(subset=['Time']).copy()
+    if excluded_dates:
+        frame = frame[~frame['Time'].dt.date.isin(set(excluded_dates))]
+    frame['minute'] = frame['Time'].dt.floor('min')
+    minute = frame.groupby('minute', sort=True)['SVM'].mean()
+    minute_of_day = minute.index.hour * 60 + minute.index.minute
+    return minute.groupby(minute_of_day).mean().reindex(range(1440)).to_numpy(float)
 
-    X_h = np.nanmean(X_m, axis=0)              # mean Activity per hour across days
-    # Pass as a Series with clock-hour index so _filterHour_ForwardBack
-    # preserves the original hour labels in the returned DataFrame
-    X_h_series = pd.Series(X_h, index=np.arange(24))
-    df  = _filterHour_ForwardBack(X_h_series, 11)
 
-    df_sorted = df.sort_values(by='filterHourMean', ascending=False)
+def _circular_window_means(profile, window_minutes, resolution_minutes):
+    if not 1 <= window_minutes <= len(profile):
+        raise ValueError("window must be between 1 minute and 24 hours.")
+    if resolution_minutes < 1:
+        raise ValueError("resolution_minutes must be positive.")
+    extended = np.concatenate([profile, profile[:window_minutes - 1]])
+    finite = np.isfinite(extended)
+    values = np.where(finite, extended, 0.0)
+    sums = np.r_[0.0, np.cumsum(values)]
+    counts = np.r_[0, np.cumsum(finite.astype(np.int64))]
+    starts = np.arange(0, len(profile), resolution_minutes, dtype=int)
+    window_sums = sums[starts + window_minutes] - sums[starts]
+    window_counts = counts[starts + window_minutes] - counts[starts]
+    means = np.full(len(starts), np.nan, dtype=float)
+    complete = window_counts == window_minutes
+    means[complete] = window_sums[complete] / window_minutes
+    return starts, means
 
+
+def _format_clock_minute(value):
+    return f"{value // 60:02d}:{value % 60:02d}"
+
+
+def compute_mxlx(data, m_window_hours=10.0, l_window_hours=5.0,
+                  resolution_minutes=1, excluded_dates=()):
+    """Canonical nparACT-style Mx/Lx on an average 24-hour minute profile.
+
+    Windows are exact, contiguous and circular. A candidate is valid only when
+    every clock minute in it is observed on at least one non-excluded day.
+    """
+    m_minutes = int(round(float(m_window_hours) * 60))
+    l_minutes = int(round(float(l_window_hours) * 60))
+    if not np.isclose(m_minutes, float(m_window_hours) * 60):
+        raise ValueError("m_window_hours must resolve to a whole number of minutes.")
+    if not np.isclose(l_minutes, float(l_window_hours) * 60):
+        raise ValueError("l_window_hours must resolve to a whole number of minutes.")
+    profile = _clock_minute_profile(data, excluded_dates=excluded_dates)
+    m_starts, m_means = _circular_window_means(profile, m_minutes, resolution_minutes)
+    l_starts, l_means = _circular_window_means(profile, l_minutes, resolution_minutes)
+    m_valid = np.isfinite(m_means)
+    l_valid = np.isfinite(l_means)
+    m_index = int(np.nanargmax(m_means)) if m_valid.any() else None
+    l_index = int(np.nanargmin(l_means)) if l_valid.any() else None
     return {
-        'M10_hour':          int(df_sorted.iloc[0]['Hour']),
-        'M10_mean_activity': df_sorted.iloc[0]['filterHourMean'],
-    }
-
-
-def compute_L5(X_m):
-    # Computes L5: the onset hour and mean activity of the least active
-    # 5-consecutive-hour window, averaged across all recording days.
-    # See van Someren et al. (1999) — same reference as compute_M10.
-    #
-    # Input column (raw CSV)  : SVM_sum  — signal vector magnitude sum per 60-s epoch
-    # Column after io.py      : SVM      (SVM_sum renamed)
-    # Column after aggregation: Activity — mean(SVM) per calendar hour
-    # Matrix input            : X_m[d, h] = Activity for day d, hour h
-    #                           shape (D, 24), NaN for hours with no recording
-    #
-    # Algorithm:
-    #   1. Compute X_h = mean(X_m[:, h]) — mean Activity at each hour across all days
-    #   2. Apply the bidirectional 6-hour rolling mean to X_h (circular).
-    #      Window width 6 is used so that the identified hour is the exact
-    #      midpoint of a 5-hour rest window (±3 hours either side),
-    #      matching the R implementation which uses filterHour_ForwardBack(X_h, 6).
-    #   3. L5 onset = the hour h with the LOWEST rolling mean value
-    #   4. L5 mean  = that lowest rolling mean value
-    #
-    # L5 typically identifies the rest/sleep window (lowest activity) and
-    # its onset hour can serve as a proxy for habitual sleep time.
-
-    X_h = np.nanmean(X_m, axis=0)              # mean Activity per hour across days
-    X_h_series = pd.Series(X_h, index=np.arange(24))
-    df  = _filterHour_ForwardBack(X_h_series, 6)
-
-    df_sorted = df.sort_values(by='filterHourMean', ascending=True)
-
-    return {
-        'L5_hour':          int(df_sorted.iloc[0]['Hour']),
-        'L5_mean_activity': df_sorted.iloc[0]['filterHourMean'],
+        'M10_onset_time': _format_clock_minute(int(m_starts[m_index])) if m_index is not None else None,
+        'M10_mean_activity': float(m_means[m_index]) if m_index is not None else np.nan,
+        'L5_onset_time': _format_clock_minute(int(l_starts[l_index])) if l_index is not None else None,
+        'L5_mean_activity': float(l_means[l_index]) if l_index is not None else np.nan,
+        'm_window_hours': float(m_window_hours),
+        'l_window_hours': float(l_window_hours),
+        'mxlx_resolution_minutes': int(resolution_minutes),
+        'mxlx_complete_profile': bool(np.isfinite(profile).all()),
     }

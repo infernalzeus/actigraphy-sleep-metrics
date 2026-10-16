@@ -58,7 +58,7 @@ readParticipantCSV = _io.readParticipantCSV
 
 from preprocess   import timeBin, aggregateHours, dayByHourMatrix
 from nonparametric  import (interdailyStability, intradailyVariability,
-                             compute_M10, compute_L5)
+                             compute_mxlx)
 from periodogram    import (periodogram_Enright, periodogram_ChiSquare,
                              add_pValue_ChiSquare)
 from visualize      import activityHeatmap, generate_pdf_report
@@ -89,6 +89,13 @@ def build_parser():
                          '(omit to run all)')
     rp.add_argument('--verbose', action='store_true',
                     help='Print progress and computed values to stdout')
+    rp.add_argument('--output-dir', type=Path, default=None,
+                    help='Output directory (default: repository outputs/).')
+    rp.add_argument('--timezone', default=None,
+                    help='IANA timezone override; otherwise use Step 1 metadata.')
+    rp.add_argument('--m-window-hours', type=float, default=10.0)
+    rp.add_argument('--l-window-hours', type=float, default=5.0)
+    rp.add_argument('--mxlx-resolution-minutes', type=int, default=1)
     return parser
 
 
@@ -110,13 +117,17 @@ def run_read(args):
     run_temp_metrics  = args.measures in (None, 'temp_metrics')
     run_sri           = args.measures in (None, 'sri')
 
-    outputs_dir = Path(_pkg) / 'outputs'
-    outputs_dir.mkdir(exist_ok=True)
+    outputs_dir = (Path(args.output_dir).expanduser().resolve()
+                   if args.output_dir else Path(_pkg) / 'outputs')
+    outputs_dir.mkdir(parents=True, exist_ok=True)
     stem = input_path.stem
 
     # ── 1. load ───────────────────────────────────────────────────────────────
     vprint(v, f"[1/4] Reading: {input_path}")
-    d = readParticipantCSV(str(input_path.parent), input_path.name)
+    d = readParticipantCSV(str(input_path.parent), input_path.name,
+                           timezone=args.timezone)
+    excluded_dates = d.attrs.get('dst_excluded_dates', [])
+    d_fixed_day = d[~d['Time'].dt.date.isin(excluded_dates)].copy()
 
     delta = timeBin(d)
     vprint(v, f"      Rows: {len(d):,}  |  epoch: {delta:.1f} min  |  "
@@ -127,7 +138,7 @@ def run_read(args):
 
     # ── 2. aggregate to hourly means and build day×hour matrix ────────────────
     vprint(v, "[2/4] Aggregating to hourly means and building day×hour matrix...")
-    hourly     = aggregateHours(d)
+    hourly     = aggregateHours(d_fixed_day)
     mat, dates = dayByHourMatrix(hourly)
     vprint(v, f"      Matrix: {mat.shape[0]} days × {mat.shape[1]} hours  "
               f"({np.isnan(mat).sum()} NaN cells)")
@@ -143,26 +154,30 @@ def run_read(args):
 
         # ---- aggregate (whole-recording) measures ----
         IS  = interdailyStability(mat)
-        IV  = intradailyVariability(mat)
-        m10 = compute_M10(mat)
-        l5  = compute_L5(mat)
+        IV  = intradailyVariability(mat, LOCF=False)
+        mxlx = compute_mxlx(
+            d_fixed_day,
+            m_window_hours=args.m_window_hours,
+            l_window_hours=args.l_window_hours,
+            resolution_minutes=args.mxlx_resolution_minutes,
+            excluded_dates=excluded_dates,
+        )
 
         results = {
             'IS':                IS,
             'IV':                IV,
-            'M10_hour':          m10['M10_hour'],
-            'M10_mean_activity': m10['M10_mean_activity'],
-            'L5_hour':           l5['L5_hour'],
-            'L5_mean_activity':  l5['L5_mean_activity'],
+            **mxlx,
+            'timezone':          d.attrs.get('timezone'),
+            'dst_days_excluded': len(excluded_dates),
         }
 
         if v:
             print(f"      IS   = {IS:.4f}  (0 = no stability, 1 = perfect)")
             print(f"      IV   = {IV:.4f}  (0 = sinusoidal, ~2 = pure noise)")
-            print(f"      M10  onset {int(m10['M10_hour']):02d}:00,  "
-                  f"mean activity = {m10['M10_mean_activity']:.4f}")
-            print(f"      L5   onset {int(l5['L5_hour']):02d}:00,  "
-                  f"mean activity = {l5['L5_mean_activity']:.4f}")
+            print(f"      M10  onset {mxlx['M10_onset_time']},  "
+                  f"mean activity = {mxlx['M10_mean_activity']:.4f}")
+            print(f"      L5   onset {mxlx['L5_onset_time']},  "
+                  f"mean activity = {mxlx['L5_mean_activity']:.4f}")
 
 
     if run_temp_metrics:
